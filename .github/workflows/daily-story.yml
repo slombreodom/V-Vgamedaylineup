@@ -1,0 +1,84 @@
+name: Daily Game Day Story
+
+on:
+  schedule:
+    # 9:00 AM Chicago time during daylight saving (14:00 UTC).
+    # After Nov 1 (standard time) change to "0 15 * * *" to keep 9:00 AM.
+    - cron: "0 14 * * *"
+  workflow_dispatch:        # adds a "Run workflow" button for on-demand runs
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Build today's stories
+        run: python generate_stories.py
+
+      - name: Save to the repo
+        run: |
+          git config user.name "vv-story-bot"
+          git config user.email "vv-story-bot@users.noreply.github.com"
+          git add stories
+          git diff --cached --quiet || git commit -m "Game day stories for $(TZ=America/Chicago date +%F)"
+          git push
+
+  post:
+    needs: build
+    # Pause switch: Settings > Secrets and variables > Actions > Variables,
+    # add POST_TO_INSTAGRAM = false to build stories without posting them.
+    if: vars.POST_TO_INSTAGRAM != 'false'
+    runs-on: ubuntu-latest
+    # Optional approval step: add "Required reviewers" to the "instagram"
+    # environment (Settings > Environments) and each post waits for your OK.
+    environment: instagram
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}    # includes the stories the build job just saved
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Post to Instagram Stories
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          export COMMIT_SHA=$(git rev-parse HEAD)
+          python post_to_instagram.py
+
+      - name: Record what was posted
+        if: always()
+        run: |
+          git config user.name "vv-story-bot"
+          git config user.email "vv-story-bot@users.noreply.github.com"
+          git add stories
+          git diff --cached --quiet || git commit -m "Posted game day stories $(TZ=America/Chicago date +%F)"
+          git push
+
+      - name: Keep the Instagram token fresh
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -f .new_token ] && [ -n "$GH_TOKEN" ]; then
+            gh secret set IG_ACCESS_TOKEN < .new_token && echo "Saved the refreshed token."
+          elif [ -f .new_token ]; then
+            echo "::warning::Add a GH_PAT secret so the Instagram token renews itself, or it expires in 60 days."
+          fi
+          rm -f .new_token
